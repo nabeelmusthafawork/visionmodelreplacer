@@ -105,6 +105,39 @@ def test_no_target_in_region():
     assert info["blobs"] == []
 
 
+def test_locater_cli_window(tmp_path):
+    import json
+    from locater.cli import main as locater_main
+
+    # Build image with vertical split line at x=640
+    img = Image.new("RGB", (W, H), "#222222")
+    d = ImageDraw.Draw(img)
+    # Divider line
+    d.line([(640, 0), (640, H)], fill="#888888", width=2)
+    # Left window content
+    d.ellipse([200, 200, 280, 280], fill="#FF7A00")
+    # Right window content
+    d.rectangle([800, 200, 950, 300], fill="#22C55E")
+
+    img_path = str(tmp_path / "split.png")
+    img.save(img_path)
+
+    out_file = str(tmp_path / "out1.json")
+    ret = locater_main([img_path, "--window", "W1", "--color", "#FF7A00", "-j", "--out", out_file])
+    assert ret == 0
+    data = json.loads(Path(out_file).read_text())
+    assert len(data["matches"]) >= 1
+    assert data["window"]["id"] == "W1"
+    assert data["matches"][0]["bbox"][0] < 640
+
+    out_file2 = str(tmp_path / "out2.json")
+    ret2 = locater_main([img_path, "--window", "W2", "--color", "#FF7A00", "-j", "--out", out_file2])
+    assert ret2 == 0
+    data2 = json.loads(Path(out_file2).read_text())
+    assert len(data2["matches"]) == 0
+    assert data2["window"]["id"] == "W2"
+
+
 if __name__ == "__main__":
     for name in sorted(n for n in globals() if n.startswith("test_")):
         fn = globals()[name]

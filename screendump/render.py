@@ -25,6 +25,8 @@ _GUTTER = 1  # blank column between side-by-side panels
 
 def _noise(el: Element) -> bool:
     """Textless boxes/icons add no information; drop them."""
+    if el.children:
+        return False
     if el.kind in ("box", "icon") and not el.text:
         return True
     return bool(el.text) and not _wordy(el.text)
@@ -64,11 +66,53 @@ class Renderer:
         lines: list[str] = []
         frames = [r for r in roots if r.kind in ("window", "panel")]
         strays = [r for r in roots if r.kind not in ("window", "panel") and not _noise(r)]
-        for i, root in enumerate(frames):
-            if i:
+
+        # Check if desktop has top/bottom full-width bars (e.g. status bar / dock)
+        top_bars = [
+            r for r in frames
+            if r.w >= 0.75 * self.img_w and r.h <= max(64, int(0.15 * self.img_h)) and r.y <= 0.15 * self.img_h
+        ]
+        bottom_bars = [
+            r for r in frames
+            if r.w >= 0.75 * self.img_w and r.h <= max(64, int(0.15 * self.img_h)) and r.bottom >= 0.85 * self.img_h
+        ]
+        app_frames = [r for r in frames if r not in top_bars and r not in bottom_bars]
+
+        for bar in top_bars:
+            if lines:
                 lines.append("")
-            lines.extend(self._render_element(root))
-        if frames and strays:
+            lines.extend(self._render_element(bar))
+
+        if len(app_frames) == 1:
+            if lines:
+                lines.append("")
+            lines.extend(self._render_element(app_frames[0]))
+        elif len(app_frames) > 1:
+            sorted_apps = sorted(app_frames, key=lambda e: (e.y, e.x))
+            rows: list[list[Element]] = []
+            for app in sorted_apps:
+                placed = False
+                for row in rows:
+                    if self._y_overlap_app(app, row[0]):
+                        row.append(app)
+                        placed = True
+                        break
+                if not placed:
+                    rows.append([app])
+            for row in rows:
+                if lines:
+                    lines.append("")
+                if len(row) == 1:
+                    lines.extend(self._render_element(row[0]))
+                else:
+                    lines.extend(self._render_columns(row, self.width))
+
+        for bar in bottom_bars:
+            if lines:
+                lines.append("")
+            lines.extend(self._render_element(bar))
+
+        if (frames or top_bars or app_frames) and strays:
             lines.append("")
         if strays:
             desktop = Element(
@@ -78,6 +122,11 @@ class Renderer:
             _sort_and_group(desktop)
             lines.extend(self._render_element(desktop))
         return "\n".join(lines)
+
+    @staticmethod
+    def _y_overlap_app(a: Element, b: Element) -> bool:
+        overlap = min(a.bottom, b.bottom) - max(a.y, b.y)
+        return overlap >= 0.3 * min(a.h, b.h)
 
     # -- elements ------------------------------------------------------------
     def _render_element(self, el: Element) -> list[str]:
@@ -199,9 +248,15 @@ class Renderer:
         height = max(len(r) for r in rendered)
         padded: list[list[str]] = []
         for lines in rendered:
-            width = len(lines[0]) if lines else 0
+            if not lines:
+                continue
+            width = len(lines[0])
             blank = f"{self.box['v']}{' ' * max(0, width - 2)}{self.box['v']}" if width >= 2 else " " * width
-            padded.append(lines + [blank] * (height - len(lines)))
+            needed = height - len(lines)
+            if needed > 0 and len(lines) >= 2:
+                padded.append(lines[:-1] + [blank] * needed + [lines[-1]])
+            else:
+                padded.append(lines + [blank] * needed)
         return [
             " ".join(lines).strip()[:inner_w]
             for lines in zip(*padded)

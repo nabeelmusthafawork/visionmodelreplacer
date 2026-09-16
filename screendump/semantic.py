@@ -127,8 +127,22 @@ def _classify_widgets(el: Element) -> None:
 def to_dict(roots: list[Element], img_w: int, img_h: int) -> dict:
     """Structured, machine-readable view of the detected screen."""
     all_elements = flatten(roots)
+    windows = [
+        {
+            "id": r.window_id or f"W{i + 1}",
+            "title": r.title or "",
+            "type": r.ui_type or r.kind,
+            "bbox": [r.x, r.y, r.w, r.h],
+            "elements": [
+                _element_dict(e) for e in flatten([r]) if e.kind not in _CONTAINER_KINDS
+            ],
+        }
+        for i, r in enumerate(roots)
+        if r.kind == "window"
+    ]
     return {
         "screen": {"width": img_w, "height": img_h},
+        "windows": windows,
         "regions": [_region_dict(r) for r in roots],
         "elements": [_element_dict(e) for e in all_elements if e.kind not in _CONTAINER_KINDS],
     }

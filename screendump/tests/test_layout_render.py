@@ -12,9 +12,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-vision = types.ModuleType("screendump.vision")
-vision.Region = types.SimpleNamespace
-sys.modules["screendump.vision"] = vision
+try:
+    import cv2  # noqa: F401
+    from screendump import vision
+except ImportError:
+    vision = types.ModuleType("screendump.vision")
+    vision.Region = types.SimpleNamespace
+    sys.modules["screendump.vision"] = vision
 
 from screendump import layout, render, semantic  # noqa: E402
 
@@ -180,6 +184,60 @@ def test_dedupe_duplicate_ocr_lines():
     assert text.count("Reinstalled") == 1  # inverted-pass duplicate dropped
 
 
+def test_multi_window_side_by_side_rendering():
+    w1 = el("window", 0, 30, 960, 1050)
+    w1.children = [
+        el("text", 20, 50, 150, 20, "nabeel@arch:~$"),
+        el("text", 20, 90, 200, 20, "$ git status"),
+    ]
+    w2 = el("window", 960, 30, 960, 1050)
+    w2.children = [
+        el("input", 980, 70, 400, 30, "https://github.com"),
+        el("button", 980, 120, 80, 30, "Search"),
+    ]
+    top_bar = el("panel", 0, 0, 1920, 30)
+    top_bar.children = [el("text", 900, 5, 120, 20, "sep 16 2:16PM")]
+
+    roots = [top_bar, w1, w2]
+    layout._sort_and_group(w1)
+    layout._sort_and_group(w2)
+    layout._sort_and_group(top_bar)
+    layout._tag_window_identities(roots)
+    semantic.classify(roots)
+
+    out = render.Renderer(1920, 1080, width=120).render(roots)
+    print("\n" + out)
+
+    assert "PANEL" in out or "STATUSBAR" in out
+    assert "[W1]" in out and "[W2]" in out
+    # Both windows must be on the same horizontal lines (side-by-side)
+    window_headers = [line for line in out.splitlines() if "[W1]" in line and "[W2]" in line]
+    assert len(window_headers) == 1, "Expected both [W1] and [W2] headers on the same line"
+    # Both windows must have their bottom borders aligned
+    bottom_borders = [line for line in out.splitlines() if line.count("\u2518") >= 2]
+    assert len(bottom_borders) >= 1, "Expected side-by-side bottom borders aligned on same line"
+
+
+def test_multi_window_json_structure():
+    w1 = el("window", 0, 30, 960, 1050)
+    w1.children = [el("text", 20, 50, 150, 20, "nabeel@arch:~$")]
+    w2 = el("window", 960, 30, 960, 1050)
+    w2.children = [el("button", 980, 120, 80, 30, "Login")]
+    roots = [w1, w2]
+    layout._sort_and_group(w1)
+    layout._sort_and_group(w2)
+    layout._tag_window_identities(roots)
+    semantic.classify(roots)
+
+    data = semantic.to_dict(roots, 1920, 1080)
+    assert "windows" in data
+    assert len(data["windows"]) == 2
+    assert data["windows"][0]["id"] == "W1"
+    assert data["windows"][1]["id"] == "W2"
+    assert data["windows"][0]["bbox"] == [0, 30, 960, 1050]
+    assert data["windows"][1]["bbox"] == [960, 30, 960, 1050]
+
+
 if __name__ == "__main__":
     test_browser_window()
     test_ascii_mode()
@@ -189,4 +247,6 @@ if __name__ == "__main__":
     test_chrome_tabs_and_desktop()
     test_no_line_cap()
     test_dedupe_duplicate_ocr_lines()
+    test_multi_window_side_by_side_rendering()
+    test_multi_window_json_structure()
     print("ALL TESTS PASSED")

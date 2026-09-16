@@ -119,14 +119,16 @@ def ocr_words(png_bytes: bytes, psm: int = 11, min_conf: float = 30.0) -> list[W
     return words
 
 
-def group_lines(words: list[Word]) -> list[Line]:
+def group_lines(words: list[Word], splits: Iterable[int] | None = None) -> list[Line]:
     """Group word boxes into lines using tesseract's block/par/line grouping.
 
     Words arrive in reading order from tesseract; consecutive words that
-    belong to the same line (overlap in y) are merged.
+    belong to the same line (overlap in y, reasonable x gap, and not crossing
+    window splits) are merged.
     """
     if not words:
         return []
+    split_set = tuple(splits) if splits else ()
     lines: list[Line] = []
     current: list[Word] = [words[0]]
     prev = words[0]
@@ -154,9 +156,14 @@ def group_lines(words: list[Word]) -> list[Line]:
 
     for word in words[1:]:
         y_overlap = min(prev.bottom, word.bottom) - max(prev.y, word.y)
+        max_gap = max(32, int(2.5 * max(prev.h, word.h)))
+        x_gap = word.x - prev.right
+        crosses_split = any(prev.right <= s <= word.x for s in split_set)
         same_line = (
             y_overlap >= 0.3 * min(prev.h, word.h)
             and abs(word.y - prev.y) <= 0.6 * max(prev.h, word.h)
+            and 0 <= x_gap <= max_gap
+            and not crosses_split
         )
         if same_line:
             current.append(word)

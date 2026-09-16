@@ -30,7 +30,9 @@ def _ocr_all(
     bgr: np.ndarray, regions: list[vision.Region], psm: int, min_conf: float
 ) -> list[ocr.Line]:
     """OCR the full image, plus an inverted pass for dark filled buttons."""
-    lines = ocr.ocr_lines(_png_bytes(bgr), psm=psm, min_conf=min_conf)
+    splits = [r.x for r in regions if r.kind == "window" and r.x > 0]
+    words = ocr.ocr_words(_png_bytes(bgr), psm=psm, min_conf=min_conf)
+    lines = ocr.group_lines(words, splits=splits)
 
     for r in regions:
         if r.kind not in ("button",):
@@ -168,6 +170,26 @@ def main(argv: list[str] | None = None) -> int:
         help="output structured JSON instead of the ASCII map",
     )
     parser.add_argument("--ascii", action="store_true", help="use pure ASCII box characters")
+    parser.add_argument(
+        "--mode",
+        choices=["auto", "targeted", "fast", "full"],
+        default=None,
+        help="perception mode: auto (smart widget+window), targeted (boxes only), fast (2x downsampled), full (deep OCR)",
+    )
+    parser.add_argument("--fast", action="store_true", help="fast layout mode (downsampled single-pass OCR, 3-5x faster)")
+    parser.add_argument("--targeted", action="store_true", help="targeted mode (only OCR detected interactive boxes, fastest)")
+    parser.add_argument(
+        "--window",
+        metavar="ID_OR_NAME",
+        help="scope dump to a specific window by ID (W1, W2) or title (Terminal, Browser)",
+    )
+    parser.add_argument("--click", nargs=2, type=int, metavar=("X", "Y"), help="click coordinates before dumping")
+    parser.add_argument("--double-click", nargs=2, type=int, metavar=("X", "Y"), help="double click coordinates before dumping")
+    parser.add_argument("--button", default="left", choices=["left", "right", "middle"], help="mouse button (default: left)")
+    parser.add_argument("--type", dest="type_text", help="type text before dumping")
+    parser.add_argument("--key", dest="key_combo", help="send key combination before dumping (e.g. 'enter')")
+    parser.add_argument("--verify", action="store_true", help="verify visual change after action")
+    parser.add_argument("--settle", type=int, default=150, help="ms to sleep after action before dump (default: 150)")
     parser.add_argument("--psm", type=int, default=11, help="tesseract page segmentation mode (default: 11)")
     parser.add_argument("--min-conf", type=float, default=30.0, help="minimum OCR confidence (default: 30)")
     parser.add_argument("--out", help="write the text representation to a file instead of stdout")
@@ -176,6 +198,57 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.screenshot and args.image:
         raise SystemExit("error: give either --screenshot or an image path, not both")
+
+    # Perform action if requested
+    action_info = None
+    if args.click or args.double_click or args.type_text or args.key_combo:
+        from locater import action
+        import time
+        action_info = {}
+        if args.double_click:
+            action.double_click(args.double_click[0], args.double_click[1])
+            action_info["action"] = "double_click"
+            action_info["target"] = args.double_click
+        elif args.click:
+            action.click(args.click[0], args.click[1], button=args.button)
+            action_info["action"] = "click"
+            action_info["target"] = args.click
+
+        if args.type_text:
+            time.sleep(0.05)
+            t_res = action.type_text(args.type_text, verify=args.verify)
+            action_info["type"] = t_res
+
+        if args.key_combo:
+            time.sleep(0.05)
+            action.press_key(args.key_combo)
+            action_info["key"] = args.key_combo
+
+        time.sleep(max(0, args.settle) / 1000.0)
+
+    # Fast-path: query background daemon if running and no debug/image path given
+    if not args.image and not args.debug and not action_info:
+        from screendump.daemon import send_daemon_request
+        resp = send_daemon_request({
+            "cmd": "dump",
+            "fast": args.fast,
+            "targeted": args.targeted,
+            "mode": args.mode,
+            "window": args.window,
+            "json": args.json,
+            "ascii": args.ascii,
+            "psm": args.psm,
+            "min_conf": args.min_conf,
+        })
+        if resp and resp.get("ok"):
+            res = resp["result"]
+            output = json.dumps(res, indent=2) if args.json else str(res)
+            if args.out:
+                Path(args.out).write_text(output + "\n")
+            else:
+                print(output)
+            return 0
+
     if args.image:
         data = Path(args.image).read_bytes()
     else:
@@ -189,25 +262,33 @@ def main(argv: list[str] | None = None) -> int:
     img_h, img_w = bgr.shape[:2]
 
     debug: dict | None = {} if args.debug else None
-    regions = vision.detect_regions(bgr, debug=debug)
-    try:
-        lines = _ocr_all(bgr, regions, psm=args.psm, min_conf=args.min_conf)
-    except ocr.TesseractError as exc:
-        print(f"warning: OCR failed: {exc}", file=sys.stderr)
-        lines = []
-    roots = layout.build_tree(regions, lines)
-    semantic.classify(roots)
+
+    from screendump.dump import dump_image
+    result = dump_image(
+        bgr,
+        is_json=args.json,
+        fast=args.fast,
+        targeted=args.targeted,
+        mode=args.mode,
+        window=args.window,
+        ascii_chars=args.ascii,
+        psm=args.psm,
+        min_conf=args.min_conf,
+        debug=debug,
+    )
+
+    if action_info and args.json and isinstance(result, dict):
+        result["action"] = action_info
 
     if args.debug:
         json_debug = {k: v for k, v in debug.items() if k != "annotated"}
         Path(args.debug + ".json").write_text(json.dumps(json_debug, indent=2))
         cv2.imwrite(args.debug + ".png", debug["annotated"])
 
-    if args.json:
-        output = json.dumps(semantic.to_dict(roots, img_w, img_h), indent=2)
-    else:
-        width = shutil.get_terminal_size((80, 24)).columns
-        output = render.render(roots, img_w, img_h, width=width, ascii_chars=args.ascii)
+    output = json.dumps(result, indent=2) if args.json else str(result)
+    if action_info and not args.json:
+        output = f"-> action: {action_info}\n" + output
+
     if args.out:
         Path(args.out).write_text(output + "\n")
     else:

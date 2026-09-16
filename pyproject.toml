@@ -7,10 +7,24 @@ name = "screendump"
 version = "0.1.0"
 description = "Converts a screenshot into a structured text/ASCII UI representation"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+]
 
 [project.scripts]
 screendump = "screendump.cli:main"
+locater = "locater.cli:main"
+visiond = "screendump.daemon:main"
 
 [tool.setuptools]
-packages = ["screendump"]
+packages = ["screendump", "locater"]
+
+[dependency-groups]
+dev = [
+    "pillow>=10.0.0",
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

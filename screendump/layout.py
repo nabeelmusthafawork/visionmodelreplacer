@@ -17,6 +17,7 @@ class Element:
     h: int
     text: str = ""
     title: str = ""
+    window_id: str = ""
     consumed: bool = False  # rendered by its parent (e.g. title bar)
     ui_type: str = ""  # semantic: sidebar | main | terminal | tabbar | toolbar | statusbar | tab | heading | menu | form | ...
     confidence: float | None = None  # OCR confidence of the attached text
@@ -171,12 +172,18 @@ def build_tree(
             parent.children.append(e)
             e._parent = parent
 
+    # Any box that contains children is a panel (card/container)
+    for e in elements:
+        if e.kind == "box" and e.children:
+            e.kind = "panel"
+
     roots = [e for e in elements if not hasattr(e, "_parent")]
     for e in elements:
         if hasattr(e, "_parent"):
             del e._parent
 
     _extract_titles(roots)
+    _tag_window_identities(roots)
     for root in roots:
         _sort_and_group(root)
     return roots
@@ -201,6 +208,37 @@ def _extract_titles(roots: list[Element]) -> None:
                 root.title = texts[0].text
                 child.consumed = True
                 root.children.remove(child)
+
+
+def _tag_window_identities(roots: list[Element]) -> None:
+    """Tag window IDs (W1, W2...) and infer application titles."""
+    window_roots = [r for r in roots if r.kind == "window"]
+    w_idx = 1
+    for root in window_roots:
+        root.window_id = f"W{w_idx}"
+        w_idx += 1
+        all_texts = " ".join(c.text for c in flatten([root]))
+        inferred = ""
+        if any(term in all_texts for term in ("@arch", "@ubuntu", "@debian", "@fedora", ":~$", "bash", "zsh", "fish", "$ ", "# ")):
+            inferred = "Terminal"
+        elif any(b_name in all_texts for b_name in ("search.brave.com", "Brave", "brave")):
+            inferred = "Brave"
+        elif any(b_name in all_texts for b_name in ("Firefox", "Mozilla", "firefox")):
+            inferred = "Firefox"
+        elif any(b_name in all_texts for b_name in ("Chrome", "chrome", "google.com", "http://", "https://")):
+            inferred = "Browser"
+
+        clean = root.title.strip()
+        if len(window_roots) == 1 and clean:
+            continue
+        if clean and inferred and inferred.lower() not in clean.lower():
+            root.title = f"[{root.window_id}] {inferred} - {clean}"
+        elif clean:
+            root.title = f"[{root.window_id}] {clean}"
+        elif inferred:
+            root.title = f"[{root.window_id}] {inferred}"
+        else:
+            root.title = f"[{root.window_id}] Window"
 
 
 def _smallest_element_containing(

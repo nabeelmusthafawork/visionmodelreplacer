@@ -57,20 +57,112 @@ def _background_level(gray: np.ndarray) -> int:
     return int(hist.argmax())
 
 
+def detect_desktop_partitions(bgr: np.ndarray) -> list[Region]:
+    """Detect top-level desktop window partitions and system status bars.
+
+    Finds full-width status bars (top/bottom) and vertical/horizontal screen
+    seam splits (e.g. side-by-side or tiled application windows).
+    """
+    h, w = bgr.shape[:2]
+    if w < 400 or h < 300:
+        return []
+
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    sobel_y = np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3))
+    row_counts = np.sum(sobel_y > 15, axis=1)
+
+    y_top = 0
+    for r in range(16, min(65, h // 4)):
+        if row_counts[r] >= 0.85 * w and np.any(sobel_y[r, :5] > 15) and np.any(sobel_y[r, -5:] > 15):
+            y_top = r + 1
+
+    y_bottom = h
+    for r in range(max(h - 65, 3 * h // 4), h - 15):
+        if row_counts[r] >= 0.85 * w and np.any(sobel_y[r, :5] > 15) and np.any(sobel_y[r, -5:] > 15):
+            y_bottom = r
+            break
+
+    h_act = y_bottom - y_top
+    if h_act < 100:
+        return []
+
+    active_gray = gray[y_top:y_bottom, :]
+    sobel_x = np.abs(cv2.Sobel(active_gray, cv2.CV_64F, 1, 0, ksize=3))
+    col_counts = np.sum(sobel_x > 15, axis=0)
+
+    raw_splits = []
+    min_col = int(0.08 * w)
+    max_col = int(0.92 * w)
+    for c in range(min_col, max_col):
+        if col_counts[c] >= 0.55 * h_act:
+            raw_splits.append(c)
+
+    splits = []
+    for c in raw_splits:
+        if not splits or c - splits[-1] > 20:
+            splits.append(c)
+
+    if not splits and y_top == 0 and y_bottom == h:
+        return []
+
+    partitions: list[Region] = []
+    if y_top > 0:
+        partitions.append(Region(x=0, y=0, w=w, h=y_top, kind="panel", border_ratio=1.0))
+    if y_bottom < h:
+        partitions.append(Region(x=0, y=y_bottom, w=w, h=h - y_bottom, kind="panel", border_ratio=1.0))
+
+    if splits:
+        xs = [0] + splits + [w]
+        for i in range(len(xs) - 1):
+            x1, x2 = xs[i], xs[i + 1]
+            tw = x2 - x1
+            # Check if this vertical tile has an internal horizontal split
+            tile_gray = gray[y_top:y_bottom, x1:x2]
+            tile_sobel_y = np.abs(cv2.Sobel(tile_gray, cv2.CV_64F, 0, 1, ksize=3))
+            tile_row_counts = np.sum(tile_sobel_y > 15, axis=1)
+            h_splits = [
+                r
+                for r in range(int(0.15 * h_act), int(0.85 * h_act))
+                if tile_row_counts[r] > 0.85 * tw
+                and np.any(tile_sobel_y[r, :5] > 15)
+                and np.any(tile_sobel_y[r, -5:] > 15)
+            ]
+            # Group nearby h_splits
+            grouped_h: list[int] = []
+            for hr in h_splits:
+                if not grouped_h or hr - grouped_h[-1] > 20:
+                    grouped_h.append(hr)
+
+            if grouped_h:
+                ys = [0] + grouped_h + [h_act]
+                for j in range(len(ys) - 1):
+                    partitions.append(
+                        Region(x=x1, y=y_top + ys[j], w=tw, h=ys[j + 1] - ys[j], kind="window", border_ratio=1.0)
+                    )
+            else:
+                partitions.append(Region(x=x1, y=y_top, w=tw, h=h_act, kind="window", border_ratio=1.0))
+    elif y_top > 0 or y_bottom < h:
+        partitions.append(Region(x=0, y=y_top, w=w, h=h_act, kind="window", border_ratio=1.0))
+
+    return partitions
+
+
 def detect_regions(bgr: np.ndarray, debug: dict | None = None) -> list[Region]:
     """Detect rectangular UI regions (windows, cards, buttons, inputs...).
 
     Strategy:
-      1. Canny edges, then dilate so neighbouring strokes merge into blobs.
-      2. Find all contours (RETR_LIST: nested widgets too) -> bounding rects.
-      3. Keep rects with plausible UI sizes, drop irregular text blobs and
+      1. Detect desktop window partitions (status bars, tiled/snapped windows).
+      2. Canny edges, then dilate so neighbouring strokes merge into blobs.
+      3. Find all contours (RETR_LIST: nested widgets too) -> bounding rects.
+      4. Keep rects with plausible UI sizes, drop irregular text blobs and
          near-duplicate detections.
-      4. Classify each rect: window/panel (large), button/input (small,
-         bordered), icon (tiny) - measured on the ORIGINAL image so
-         brightness semantics survive.
+      5. Classify each rect: window/panel (large), button/input (small,
+         bordered), icon (tiny).
     """
     h, w = bgr.shape[:2]
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    partitions = detect_desktop_partitions(bgr)
+
     edges = cv2.Canny(cv2.equalizeHist(gray), 40, 120)
     kernel = _adaptive_kernel(w)
     dilated = cv2.dilate(edges, np.ones((kernel, kernel), np.uint8), iterations=2)
@@ -90,14 +182,19 @@ def detect_regions(bgr: np.ndarray, debug: dict | None = None) -> list[Region]:
             continue
         if x <= 2 and y <= 2 and cw >= w - 4 and ch >= h - 4:
             continue  # the whole image
+        # Don't add contour if it duplicates a desktop partition
+        if any(
+            abs(x - p.x) <= 8 and abs(y - p.y) <= 8 and abs(cw - p.w) <= 16 and abs(ch - p.h) <= 16
+            for p in partitions
+        ):
+            continue
         peri = cv2.arcLength(c, True)
         rect_peri = 2 * (cw + ch)
         if peri > rect_peri * 1.35:
             continue  # irregular blob (text glyphs etc.), not a UI box
         rects.append((x, y, cw, ch))
 
-    # Sort by area descending; drop near-duplicates (nearly same size AND
-    # contained in a bigger kept rect) but KEEP genuinely nested widgets.
+    # Sort by area descending; drop near-duplicates
     rects.sort(key=lambda r: r[2] * r[3], reverse=True)
     kept: list[tuple[int, int, int, int]] = []
     for r in rects:
@@ -119,16 +216,19 @@ def detect_regions(bgr: np.ndarray, debug: dict | None = None) -> list[Region]:
             kept.append(r)
 
     # A "window" must be an outermost region (not contained in another).
+    # If desktop partitions were found, those partitions are already windows.
+    has_window_partitions = any(p.kind == "window" for p in partitions)
     windows: set[int] = set()
-    for i, (x, y, rw, rh) in enumerate(kept):
-        if any(
-            x >= kx + 3 and y >= ky + 3 and x + rw <= kx + kw - 3 and y + rh <= ky + kh - 3
-            for kx, ky, kw, kh in kept
-        ):
-            continue
-        windows.add(i)
+    if not has_window_partitions:
+        for i, (x, y, rw, rh) in enumerate(kept):
+            if any(
+                x >= kx + 3 and y >= ky + 3 and x + rw <= kx + kw - 3 and y + rh <= ky + kh - 3
+                for kx, ky, kw, kh in kept
+            ):
+                continue
+            windows.add(i)
 
-    regions: list[Region] = []
+    regions: list[Region] = list(partitions)
     bg = _background_level(gray)
     for i, (x, y, rw, rh) in enumerate(kept):
         region = _classify(bgr, gray, x, y, rw, rh, bg, i in windows)
