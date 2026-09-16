@@ -16,6 +16,7 @@ dependencies = [
 screendump = "screendump.cli:main"
 locater = "locater.cli:main"
 visiond = "screendump.daemon:main"
+flow = "locater.flow:main"
 
 [tool.setuptools]
 packages = ["screendump", "locater"]

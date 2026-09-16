@@ -97,10 +97,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--fast", action="store_true", help="use fast layout mode for post-action dump")
     parser.add_argument("--targeted", action="store_true", help="use targeted box OCR mode for post-action dump")
+    parser.add_argument("--step", action="append", dest="flow_steps", help="execute chained flow step (e.g. 'nav:...', 'click:...', 'type:...')")
+    parser.add_argument("--flow", dest="flow_file", help="path to flow JSON file or JSON string")
     parser.add_argument("-j", "--json", action="store_true", help="output JSON")
     parser.add_argument("--out", help="write output to a file instead of stdout")
     parser.add_argument("--debug", metavar="PREFIX", help="write debug JSON + annotated PNG (base name)")
     args = parser.parse_args(argv)
+
+    if args.flow_steps or args.flow_file:
+        from locater.flow import FlowExecutor, parse_step_string
+        steps = []
+        if args.flow_file:
+            raw_str = args.flow_file
+            if os.path.exists(raw_str):
+                raw_str = open(raw_str).read()
+            loaded = json.loads(raw_str)
+            steps = loaded if isinstance(loaded, list) else loaded.get("steps", [])
+        elif args.flow_steps:
+            for s in args.flow_steps:
+                steps.append(parse_step_string(s))
+        executor = FlowExecutor(default_window=args.window)
+        res = executor.run_flow(steps, post_dump=True)
+        out_str = json.dumps(res, indent=2) if args.json else f"Flow {'COMPLETED' if res['ok'] else 'FAILED'} in {res['total_elapsed_seconds']}s ({res['steps_executed']} steps)"
+        if args.out:
+            Path(args.out).write_text(out_str + "\n")
+        else:
+            print(out_str)
+        return 0 if res["ok"] else 1
 
     if args.image and args.screenshot:
         raise SystemExit("error: image and --screenshot are mutually exclusive")
@@ -114,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         or args.above
     ):
         raise SystemExit(
-            "error: specify at least one search criterion (--text, --color, --shape, --right-of, --below, --left-of, --above)"
+            "error: specify at least one search criterion (--text, --color, --shape, --right-of, --below, --left-of, --above) or --step"
         )
 
     # Fast-path: query background daemon if running and no debug/image/window scoping given
