@@ -16,8 +16,11 @@ Supported Step Types:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from typing import Any
@@ -65,6 +68,121 @@ class FlowExecutor:
             ):
                 return (w.x, w.y, w.right, w.bottom)
         return None
+
+    @staticmethod
+    def _find_desktop_app(q: str) -> str | None:
+        """Resolve query to a FreeDesktop .desktop application name."""
+        desktop_dirs = [
+            "/usr/share/applications",
+            os.path.expanduser("~/.local/share/applications"),
+            "/var/lib/flatpak/exports/share/applications",
+            os.path.expanduser("~/.local/share/flatpak/exports/share/applications"),
+        ]
+        q_clean = q.lower().strip()
+        candidates: list[tuple[int, str]] = []
+        for d in desktop_dirs:
+            if not os.path.isdir(d):
+                continue
+            for p in glob.glob(os.path.join(d, "*.desktop")):
+                base = os.path.splitext(os.path.basename(p))[0].lower()
+                if q_clean == base:
+                    return base
+                if q_clean in base or base in q_clean:
+                    candidates.append((abs(len(base) - len(q_clean)), base))
+                else:
+                    try:
+                        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                            for line in f:
+                                line_s = line.strip().lower()
+                                if line_s.startswith("name=") and q_clean in line_s[5:]:
+                                    candidates.append((abs(len(line_s[5:]) - len(q_clean)) + 5, base))
+                                    break
+                    except Exception:
+                        pass
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1]
+        return None
+
+    def surface_target(self, query: str, maximize: bool = False) -> dict[str, Any]:
+        """Universal Multi-Strategy Window Surfacing across Wayland, X11, GNOME, KDE:
+        1. FreeDesktop .desktop activation (gtk-launch / gio launch): activates native Wayland apps cleanly.
+        2. Detected Window Header: clicks visible title bar if segmented.
+        3. Visible Tab / Title OCR Matching: finds tabs or titles across display and clicks them.
+        4. Window Manager fallbacks (wmctrl, xdotool).
+        5. Optional Maximize (super+up).
+        """
+        q = str(query).strip()
+        q_lower = q.lower()
+        res: dict[str, Any] = {"target": q, "status": "ok"}
+
+        # Strategy 1: FreeDesktop .desktop activation (Wayland + X11 native apps)
+        desktop_app = self._find_desktop_app(q_lower)
+        if desktop_app:
+            launcher = shutil.which("gtk-launch") or shutil.which("gio")
+            if launcher:
+                cmd = ["gtk-launch", f"{desktop_app}.desktop"] if "gtk-launch" in launcher else ["gio", "launch", f"/usr/share/applications/{desktop_app}.desktop"]
+                try:
+                    subprocess.run(cmd, capture_output=True, timeout=2.0)
+                    time.sleep(0.3)
+                    res["strategy"] = "desktop_launcher"
+                    res["app"] = desktop_app
+                    if maximize:
+                        action.press_key("super+up")
+                        time.sleep(0.15)
+                    return res
+                except Exception:
+                    pass
+
+        # Strategy 2: Detected Window Region (via Screendump layout segmentation)
+        bgr = self.get_frame()
+        w_reg = self.get_window_region(bgr, q)
+        if w_reg:
+            wx1, wy1, wx2, wy2 = w_reg
+            click_x = wx1 + min(80, max(20, (wx2 - wx1) // 4))
+            click_y = wy1 + 15
+            action.click(click_x, click_y)
+            time.sleep(0.2)
+            res["strategy"] = "window_header"
+            res["coords"] = [click_x, click_y]
+            if maximize:
+                action.press_key("super+up")
+                time.sleep(0.15)
+            return res
+
+        # Strategy 3: Tab / Title OCR matching (finds browser tabs or window headings)
+        matches, _ = match.locate(bgr, text=q, fuzzy=0.6, max_n=3)
+        if matches:
+            best = min(matches, key=lambda m: m.bbox[1])
+            cx, cy = best.center
+            action.click(cx, cy)
+            time.sleep(0.25)
+            res["strategy"] = "tab_title_ocr"
+            res["coords"] = [cx, cy]
+            res["matched_text"] = best.ocr_text
+            if maximize:
+                action.press_key("super+up")
+                time.sleep(0.15)
+            return res
+
+        # Strategy 4: Window Manager IPC fallbacks
+        if shutil.which("wmctrl"):
+            r = subprocess.run(["wmctrl", "-a", q], capture_output=True)
+            if r.returncode == 0:
+                res["strategy"] = "wmctrl"
+                time.sleep(0.2)
+                return res
+
+        if shutil.which("xdotool"):
+            r = subprocess.run(["xdotool", "search", "--name", q, "windowactivate"], capture_output=True)
+            if r.returncode == 0:
+                res["strategy"] = "xdotool"
+                time.sleep(0.2)
+                return res
+
+        res["strategy"] = "unresolved"
+        res["warning"] = f"Could not explicitly surface target {q!r}, proceeding with active viewport"
+        return res
 
     def execute_step(self, step: dict[str, Any]) -> dict[str, Any]:
         t0 = time.perf_counter()
@@ -184,24 +302,14 @@ class FlowExecutor:
             action.launch_app(cmd)
             res["launched"] = cmd
 
-        elif act == "focus":
-            win_q = step.get("window") or step.get("target") or step.get("title")
+        elif act in ("focus", "surface"):
+            win_q = step.get("window") or step.get("target") or step.get("title") or step.get("app")
             if not win_q:
-                raise ValueError("focus step requires 'window' or 'title'")
-            bgr = self.get_frame()
-            w_reg = self.get_window_region(bgr, str(win_q))
-            if w_reg:
-                wx1, wy1, wx2, wy2 = w_reg
-                # Click title bar or header of window to focus
-                action.click(wx1 + 50, wy1 + 15)
-                res["focused_window"] = win_q
-                res["coords"] = [wx1 + 50, wy1 + 15]
-            else:
-                # Try xdotool windowactivate fallback
-                import subprocess
-                subprocess.run(["xdotool", "search", "--name", str(win_q), "windowactivate"], capture_output=True)
-                res["focused_via_xdotool"] = win_q
-            time.sleep(0.1)
+                raise ValueError("focus/surface step requires 'window', 'target', or 'app'")
+            maximize = bool(step.get("maximize", False))
+            surf_res = self.surface_target(str(win_q), maximize=maximize)
+            res.update(surf_res)
+            time.sleep(0.15)
 
         elif act in ("right_click", "double_click", "middle_click"):
             btn = "right" if act == "right_click" else "middle" if act == "middle_click" else "left"
@@ -346,13 +454,33 @@ def parse_step_string(s: str) -> dict[str, Any]:
         step["cmd"] = rest.strip()
         return step
 
-    if act == "focus" and "=" not in rest:
-        step["window"] = rest.strip()
+    if act in ("focus", "surface"):
+        step["action"] = "focus"
+        parts = rest.split(",")
+        for p in parts:
+            if "=" in p:
+                k, v = p.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if v.lower() == "true":
+                    step[k] = True
+                elif v.lower() == "false":
+                    step[k] = False
+                else:
+                    step[k] = v
+            elif "window" not in step:
+                step["window"] = p.strip()
         return step
 
-    if act in ("key", "hotkey") and "=" not in rest:
+    if act in ("key", "hotkey"):
         step["action"] = "key"
-        step["combo"] = rest.strip()
+        parts = rest.split(",")
+        for p in parts:
+            if "=" in p:
+                k, v = p.split("=", 1)
+                k, v = k.strip(), v.strip()
+                step[k] = float(v) if v.replace(".", "", 1).isdigit() else v
+            elif "combo" not in step and "key" not in step:
+                step["combo"] = p.strip()
         return step
 
     if act == "drag" and "->" in rest:

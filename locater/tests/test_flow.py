@@ -46,3 +46,16 @@ def test_parse_desktop_actions():
     assert s_dclick["action"] == "double_click"
     assert s_dclick["text"] == "Documents"
 
+    s_surface = parse_step_string("surface:brave,maximize=true")
+    assert s_surface["action"] == "focus"
+    assert s_surface["window"] == "brave"
+    assert s_surface["maximize"] is True
+
+
+def test_find_desktop_app():
+    # Should resolve common system apps if present
+    app = FlowExecutor._find_desktop_app("brave")
+    if app:
+        assert "brave" in app.lower()
+
+
