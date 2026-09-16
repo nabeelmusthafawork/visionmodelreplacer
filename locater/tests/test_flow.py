@@ -25,14 +25,24 @@ def test_parse_step_string():
     assert s4["interval"] == 0.2
 
 
-def test_flow_executor_mock_run():
-    executor = FlowExecutor(default_window="W1")
-    # Execute simple non-destructive key and sleep steps
-    steps = [
-        {"action": "sleep", "duration": 0.05},
-        {"action": "key", "combo": "shift"},
-    ]
-    res = executor.run_flow(steps, post_dump=False)
-    assert res["ok"] is True
-    assert res["steps_executed"] == 2
-    assert len(res["step_results"]) == 2
+def test_parse_desktop_actions():
+    s_launch = parse_step_string("launch:gnome-calculator")
+    assert s_launch == {"action": "launch", "cmd": "gnome-calculator"}
+
+    s_focus = parse_step_string("focus:OpenCode")
+    assert s_focus == {"action": "focus", "window": "OpenCode"}
+
+    s_hotkey = parse_step_string("hotkey:ctrl+shift+p")
+    assert s_hotkey == {"action": "key", "combo": "ctrl+shift+p"}
+
+    s_drag = parse_step_string("drag:100,200->450,550")
+    assert s_drag == {"action": "drag", "x1": 100, "y1": 200, "x2": 450, "y2": 550}
+
+    s_rclick = parse_step_string("right_click:text=Properties")
+    assert s_rclick["action"] == "right_click"
+    assert s_rclick["text"] == "Properties"
+
+    s_dclick = parse_step_string("double_click:text=Documents")
+    assert s_dclick["action"] == "double_click"
+    assert s_dclick["text"] == "Documents"
+

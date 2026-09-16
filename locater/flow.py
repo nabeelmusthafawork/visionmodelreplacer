@@ -177,7 +177,97 @@ class FlowExecutor:
             if not found:
                 raise TimeoutError(f"wait timed out after {timeout}s: element {text!r} not found")
 
-        elif act == "key":
+        elif act == "launch":
+            cmd = step.get("cmd") or step.get("command")
+            if not cmd:
+                raise ValueError("launch step requires 'cmd'")
+            action.launch_app(cmd)
+            res["launched"] = cmd
+
+        elif act == "focus":
+            win_q = step.get("window") or step.get("target") or step.get("title")
+            if not win_q:
+                raise ValueError("focus step requires 'window' or 'title'")
+            bgr = self.get_frame()
+            w_reg = self.get_window_region(bgr, str(win_q))
+            if w_reg:
+                wx1, wy1, wx2, wy2 = w_reg
+                # Click title bar or header of window to focus
+                action.click(wx1 + 50, wy1 + 15)
+                res["focused_window"] = win_q
+                res["coords"] = [wx1 + 50, wy1 + 15]
+            else:
+                # Try xdotool windowactivate fallback
+                import subprocess
+                subprocess.run(["xdotool", "search", "--name", str(win_q), "windowactivate"], capture_output=True)
+                res["focused_via_xdotool"] = win_q
+            time.sleep(0.1)
+
+        elif act in ("right_click", "double_click", "middle_click"):
+            btn = "right" if act == "right_click" else "middle" if act == "middle_click" else "left"
+            is_double = act == "double_click"
+            x = step.get("x")
+            y = step.get("y")
+            text = step.get("text")
+            settle = float(step.get("settle", 0.15))
+
+            if x is not None and y is not None:
+                cx, cy = int(x), int(y)
+            elif text:
+                bgr = self.get_frame()
+                region = self.get_window_region(bgr, step_window) if step_window else None
+                matches, _ = match.locate(bgr, region=region, text=text, fuzzy=float(step.get("fuzzy", 0.65)), max_n=1)
+                if not matches:
+                    raise RuntimeError(f"{act} failed: element {text!r} not found")
+                cx, cy = matches[0].center
+                res["target"] = [cx, cy]
+            else:
+                raise ValueError(f"{act} requires either [x, y] or 'text'")
+
+            if is_double:
+                action.double_click(cx, cy)
+            else:
+                action.click(cx, cy, button=btn)
+            res[f"performed_{act}"] = [cx, cy]
+            time.sleep(settle)
+
+        elif act == "drag":
+            x1, y1 = int(step["x1"]), int(step["y1"])
+            x2, y2 = int(step["x2"]), int(step["y2"])
+            action.drag(x1, y1, x2, y2)
+            res["dragged"] = {"from": [x1, y1], "to": [x2, y2]}
+
+        elif act == "wait_change":
+            timeout = float(step.get("timeout", 5.0))
+            poll = float(step.get("interval", 0.1))
+            start_t = time.perf_counter()
+            prev_bgr = self.get_frame()
+            changed = False
+            while time.perf_counter() - start_t < timeout:
+                time.sleep(poll)
+                cur_bgr = self.get_frame()
+                diff = cv2.absdiff(prev_bgr, cur_bgr)
+                if np.count_nonzero(diff) > 100:
+                    changed = True
+                    res["changed"] = True
+                    res["wait_time_seconds"] = round(time.perf_counter() - start_t, 3)
+                    break
+            if not changed:
+                raise TimeoutError("wait_change timed out: no screen pixels changed")
+
+        elif act == "assert":
+            text = step.get("text")
+            if not text:
+                raise ValueError("assert step requires 'text'")
+            bgr = self.get_frame()
+            region = self.get_window_region(bgr, step_window) if step_window else None
+            matches, _ = match.locate(bgr, region=region, text=text, fuzzy=float(step.get("fuzzy", 0.65)), max_n=1)
+            if not matches:
+                raise AssertionError(f"assert failed: text {text!r} not found on screen")
+            res["asserted_text"] = text
+            res["bbox"] = list(matches[0].bbox)
+
+        elif act == "key" or act == "hotkey":
             combo = step.get("combo") or step.get("key")
             if not combo:
                 raise ValueError("key step requires 'combo' or 'key'")
@@ -249,6 +339,28 @@ def parse_step_string(s: str) -> dict[str, Any]:
 
     if act == "nav" and "=" not in rest:
         step["url"] = rest.strip()
+        return step
+
+    if act in ("launch", "run") and "=" not in rest:
+        step["action"] = "launch"
+        step["cmd"] = rest.strip()
+        return step
+
+    if act == "focus" and "=" not in rest:
+        step["window"] = rest.strip()
+        return step
+
+    if act in ("key", "hotkey") and "=" not in rest:
+        step["action"] = "key"
+        step["combo"] = rest.strip()
+        return step
+
+    if act == "drag" and "->" in rest:
+        # e.g. drag:100,200->400,500
+        p1, p2 = rest.split("->", 1)
+        x1, y1 = (int(v.strip()) for v in p1.split(","))
+        x2, y2 = (int(v.strip()) for v in p2.split(","))
+        step["x1"], step["y1"], step["x2"], step["y2"] = x1, y1, x2, y2
         return step
 
     if act == "type":

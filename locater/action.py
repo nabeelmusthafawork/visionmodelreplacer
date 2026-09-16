@@ -51,11 +51,57 @@ def click(x: int | None = None, y: int | None = None, button: str = "left") -> N
     _ydotool("click", btn_code)
 
 
+def right_click(x: int | None = None, y: int | None = None) -> None:
+    """Perform a right mouse click (e.g. for context menus)."""
+    click(x, y, button="right")
+
+
+def middle_click(x: int | None = None, y: int | None = None) -> None:
+    """Perform a middle mouse click (e.g. paste selection, close tab)."""
+    click(x, y, button="middle")
+
+
 def double_click(x: int | None = None, y: int | None = None) -> None:
-    """Perform a rapid double click."""
+    """Perform a rapid double click (e.g. opening desktop icons, files)."""
     click(x, y, button="left")
     time.sleep(0.08)
     click(None, None, button="left")
+
+
+def mouse_down(button: str = "left") -> None:
+    """Press mouse button down without releasing."""
+    code = "0x40" if button == "left" else "0x41" if button == "right" else "0x42"
+    _ydotool("click", code)
+
+
+def mouse_up(button: str = "left") -> None:
+    """Release mouse button up."""
+    code = "0x80" if button == "left" else "0x81" if button == "right" else "0x82"
+    _ydotool("click", code)
+
+
+def drag(x1: int, y1: int, x2: int, y2: int, steps: int = 12, delay: float = 0.015) -> None:
+    """Drag mouse from (x1, y1) to (x2, y2) with button held down.
+
+    Essential for file dragging, window moving, slider adjusting, and text selection.
+    """
+    move(x1, y1)
+    time.sleep(0.06)
+    mouse_down("left")
+    time.sleep(0.04)
+    for i in range(1, steps + 1):
+        cur_x = int(x1 + (x2 - x1) * (i / steps))
+        cur_y = int(y1 + (y2 - y1) * (i / steps))
+        move(cur_x, cur_y)
+        time.sleep(delay)
+    time.sleep(0.05)
+    mouse_up("left")
+    time.sleep(0.05)
+
+
+def launch_app(command: str) -> None:
+    """Launch a native desktop app or binary detached in the background."""
+    subprocess.Popen(command, shell=True, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def scroll(dy: int = -5) -> None:
