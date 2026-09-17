@@ -5,7 +5,7 @@ description: Universal, vision-model-free global desktop UI perception and autom
 
 # VisionModelReplacer Skill (v6 - Universal Global Desktop Controller)
 
-A lightning-fast, local, vision-model-free desktop UI automation stack located at `/home/nabeel/Documents/projects/visionmodelreplacer-v6`. Controls **any native Linux desktop software** (IDEs, terminals, file managers, system settings, dialogs, media players) as well as web browsers, completely bypassing the need for cloud vision models.
+A lightning-fast, local, vision-model-free desktop UI automation stack located at `/home/nabeel/Documents/projects/visionmodelreplacer`. Controls **any native Linux desktop software** (IDEs, terminals, file managers, system settings, dialogs, media players) as well as web browsers, completely bypassing the need for cloud vision models.
 
 ---
 
@@ -47,7 +47,7 @@ The `flow` pipeline supports full desktop interaction across arbitrary applicati
 
 ```bash
 # In the v6 project directory:
-cd /home/nabeel/Documents/projects/visionmodelreplacer-v6
+cd /home/nabeel/Documents/projects/visionmodelreplacer
 
 # 1. Open VS Code / OpenCode command palette and run a command:
 uv run flow \
@@ -61,8 +61,8 @@ uv run flow \
   --step "launch:thunar /home/nabeel/Documents" \
   --step "wait:text=Documents,timeout=3.0" \
   --step "double_click:text=projects" \
-  --step "wait:text=visionmodelreplacer-v6,timeout=2.0" \
-  --step "right_click:text=visionmodelreplacer-v6" \
+  --step "wait:text=visionmodelreplacer,timeout=2.0" \
+  --step "right_click:text=visionmodelreplacer" \
   --step "wait:text=Properties,timeout=2.0" \
   --step "click:text=Properties"
 
