@@ -116,26 +116,9 @@ class FlowExecutor:
         q_lower = q.lower()
         res: dict[str, Any] = {"target": q, "status": "ok"}
 
-        # Strategy 1: FreeDesktop .desktop activation (Wayland + X11 native apps)
-        desktop_app = self._find_desktop_app(q_lower)
-        if desktop_app:
-            launcher = shutil.which("gtk-launch") or shutil.which("gio")
-            if launcher:
-                cmd = ["gtk-launch", f"{desktop_app}.desktop"] if "gtk-launch" in launcher else ["gio", "launch", f"/usr/share/applications/{desktop_app}.desktop"]
-                try:
-                    subprocess.run(cmd, capture_output=True, timeout=2.0)
-                    time.sleep(0.3)
-                    res["strategy"] = "desktop_launcher"
-                    res["app"] = desktop_app
-                    if maximize:
-                        action.press_key("super+up")
-                        time.sleep(0.15)
-                    return res
-                except Exception:
-                    pass
-
-        # Strategy 2: Detected Window Region (via Screendump layout segmentation)
         bgr = self.get_frame()
+
+        # Strategy 1: Detected Window Region (via Screendump layout segmentation)
         w_reg = self.get_window_region(bgr, q)
         if w_reg:
             wx1, wy1, wx2, wy2 = w_reg
@@ -150,7 +133,7 @@ class FlowExecutor:
                 time.sleep(0.15)
             return res
 
-        # Strategy 3: Tab / Title OCR matching (finds browser tabs or window headings)
+        # Strategy 2: Tab / Title OCR matching (finds browser tabs or window headings)
         matches, _ = match.locate(bgr, text=q, fuzzy=0.6, max_n=3)
         if matches:
             best = min(matches, key=lambda m: m.bbox[1])
@@ -159,13 +142,13 @@ class FlowExecutor:
             time.sleep(0.25)
             res["strategy"] = "tab_title_ocr"
             res["coords"] = [cx, cy]
-            res["matched_text"] = best.ocr_text
+            res["matched_text"] = best.criteria.get("text", q)
             if maximize:
                 action.press_key("super+up")
                 time.sleep(0.15)
             return res
 
-        # Strategy 4: Window Manager IPC fallbacks
+        # Strategy 3: Window Manager IPC (wmctrl, xdotool)
         if shutil.which("wmctrl"):
             r = subprocess.run(["wmctrl", "-a", q], capture_output=True)
             if r.returncode == 0:
@@ -180,8 +163,10 @@ class FlowExecutor:
                 time.sleep(0.2)
                 return res
 
-        res["strategy"] = "unresolved"
-        res["warning"] = f"Could not explicitly surface target {q!r}, proceeding with active viewport"
+        # Strategy 4: Alt-Tab cycle fallback
+        action.press_key("alt+tab")
+        time.sleep(0.2)
+        res["strategy"] = "alt_tab"
         return res
 
     def execute_step(self, step: dict[str, Any]) -> dict[str, Any]:
